@@ -1,6 +1,15 @@
 # using python 2.7.9
 # Module Proxy:
 # Testing: use without arguments or enter singular port number. 
+# Known issues: Cannot handle websites with POST requests, but can handle most HTTP-only GET-only website. 
+# 
+# Usage:
+# install python third-party package blist using pip install blist 
+# use firefox or any browser, set proxy settings to your localserverIP:PORT
+# run proxy with python proxy.py [optional PORT] 
+# Note: PORT has to be the same as the one entered into proxy.py as the argument. 
+# Will default to 8080. 
+
 import blist
 import datetime
 import httplib
@@ -23,14 +32,15 @@ CACHE_CONFIG_FILE = 'cache_config.json'
 class CacheObject:
 	""" 
 	Fields: 
-	url, last access time, expiration time, size, data
+	url, last access time, expiration time, size, data, header
 	"""
-	def __init__(self, _url, _lastAccessTime, _expirationTime, _size, _data):
+	def __init__(self, _url, _lastAccessTime, _expirationTime, _size, _data, _headers):
 		self.url = _url
 		self.lastAccessTime = _lastAccessTime
 		self.expirationTime = _expirationTime
 		self.size = _size
 		self.data = _data
+		self.headers = _headers
 	
 		
 class Cache:
@@ -65,6 +75,8 @@ class Cache:
 	"""
 
 	def __init__(self, config = CACHE_CONFIG_FILE):
+		""" Initializes the cache using a json file. Note, if a different cache config file is preferred, that file must be the first 
+		argument when instantiating this object. """ 
 		properties = json.load(open(config))
 		self.maxDuration = properties['cacheDuration']
 		self.minDuration = properties['cacheMinDuration']
@@ -74,8 +86,8 @@ class Cache:
 		self.numBytes = 0
 		self.lock = threading.Lock()
 		
-		self.accessList = blist.sortedlist(key=lambda cachedObject: cachedObject.lastAccessTime) # sort by last access time. (url, lastAcessTime)
-		self.expireList = blist.sortedlist(key=lambda cachedObject: cachedObject.expirationTime) # sort by time remaining. (url, expire-date)
+		self.accessList = blist.sortedlist(key=lambda cachedObject: cachedObject.lastAccessTime) # sort by last access time. (lastAcessTime, CacheObject)
+		self.expireList = blist.sortedlist(key=lambda cachedObject: cachedObject.expirationTime) # sort by time remaining. (expire-date, CacheObject)
 		self.map = {} # elements will be of the form, {url: CacheObject}
 	
 	def checkCacheIntegrity(self):
@@ -101,20 +113,27 @@ class Cache:
 			self.numBytes -= toRemove.size
 			self.numElems -= 1
 			
-	def cache(self, url, data, numBytes, accessTime, duration):
-		""" Inserts a new cache entry into the cache, updating all fields as necessary """
+	def cache(self, url, numBytes, accessTime, duration, data, headers):
+		""" Inserts a new cache entry into the cache, updating all fields as necessary. 
+		AccessTime and duration must be computatable. Float in this case. 
+		Store headers from the call, so that it's easier to return the cached call."""
 		if duration < self.minDuration:
 			return
-		elif duration > self.maxDuration:
+		elif duration >= self.maxDuration:
 			duration = self.maxDuration
+		
+		if numBytes > self.maxBytes:
+			return
 		
 		self.lock.acquire()
 		
 		# Just in case user calls this when there already exists a cache
 		if (url in self.map.keys()):
-			print "INVALID CACHE USAGE, " + url + " is already cached!"
+			# If it does come here, it means cache already exist but another thread was waiting to come here.
+			# So it just counts as another request for the same url. 
+			self.get(url)
 		else:
-			toCache = CacheObject(url, accessTime, accessTime + duration, numBytes, data)
+			toCache = CacheObject(url, accessTime, accessTime + duration, numBytes, data, headers)
 			self.numElems += 1
 			self.numBytes += numBytes
 			
@@ -126,7 +145,13 @@ class Cache:
 		self.lock.release()
 	
 	def get(self, url):
-		""" If not found or expired, return None. Else, return the data and modify the last access list"""
+		""" 
+		If not found or expired, return None. Else, return the data and modify the last access list. 
+		
+		Note: Since this method locks right away, you can call get(url) to check if there is anything here. 
+		Be careful, however, since if the cache does hit, it change the last access time of the cache entry.
+		Therefore it is recommended to save get returns before checking whether it's None or not. 
+		"""
 		self.lock.acquire()
 		self.checkCacheIntegrity()
 		result = None
@@ -161,77 +186,80 @@ class CachedRequestHandler(BaseHTTPRequestHandler):
 		""" Do nothing but forwarding info back and forth """
 		parsedRequest = urlparse.urlparse(self.path)		
 
-		self.send_response(400, "We don't handle POST")	
+		self.send_response(501, "We don't handle POST")	
 	
 	def do_GET(self):
 		"""Respond to a GET request."""
 		parsedRequest = urlparse.urlparse(self.path)		
-
+		# print("trying to process " + self.path)
 		
 		# Attempt cache check. 
-		#self.server.test += 1
-		
-		#print self.server.test
-		
-		
-		# Attempt to connect requested server.
-		# Randomize the port
-		# port = random.randint(0, PORT_MAX)
-		# print port
-		try:
-			# print parsedRequest.netloc
-			# print parsedRequest.path
-			# Sets a connection with a server and relays the user's request, with a 10 second timeout.
-			connection = httplib.HTTPConnection(parsedRequest.netloc, timeout = 10)
-			connection.request(self.command, parsedRequest.path)
-			response = connection.getresponse()
-			
-			#print response.status
-			#print response.read()
-			if response.status >= 200 and response.status < 300:
-				self.send_response(response.status)
-				headers = response.getheaders()
-				for header in headers:
-					self.send_header(header[0], header[1])
-				self.end_headers()
-				data = response.read()
-				self.wfile.write(data)
-				
-				# Now Cache this. 
-				
-			
-			elif response.status >= 300 and response.status < 400:
-				self.send_response(response.status)
-				headers = response.getheaders()
-				for header in headers:
-					self.send_header(header[0], header[1])
-				self.end_headers()
-				data = response.read()
-				self.wfile.write(data)
-			
-			else:
-				self.send_response(400)
-				
-			# Done with this connection, so just go ahead and collect the resources
-			connection.close()
-			
-			#self.send_header("Content-type", "text/html")
-			#self.end_headers()
-			#self.wfile.write(response.read())
+		data = self.server.cache.get(parsedRequest.netloc + parsedRequest.path)
+		if (data):
+			print "Cache-hit!"
+			self.send_response(200)
+			for header in data.headers:
+				self.send_header(header[0], header[1])
+			self.end_headers()
+			self.wfile.write(data.data)
 
-		except httplib.NotConnected:
-			print "failed to connect"
-		except httplib.InvalidURL:
-			print "Server not found"
-		except httplib.BadStatusLine:
-			print "we didn't understand the message sent by the requested server"
-		
-		# self.wfile.write("<html><head><title>Title goes here.</title></head>")
-		# self.wfile.write("<body><p>This is a test.</p>")
-		# If someone went to "http://something.somewhere.net/foo/bar/",
-		# then s.path equals "/foo/bar/".
-		# self.wfile.write("<p>You accessed path: %s</p>" % self.path)
-		# self.wfile.write("</body></html>")
+			
+		else: 
+			try:
+				# Sets a connection with a server and relays the user's request, with a 10 second timeout.
+				connection = httplib.HTTPConnection(parsedRequest.netloc, timeout = 10)
+				connection.request(self.command, parsedRequest.path)
+				response = connection.getresponse()
+				
+				# Response is good!
+				if response.status >= 200 and response.status < 300:
+					self.send_response(response.status)
+					headers = response.getheaders()
+					cacheControl = ""
+					for header in headers:
+						if (header[0] == 'Cache-control'):
+							cacheControl = header[1]
+						elif (header[0] == 'Expires'):
+							expires = header[1]
+						self.send_header(header[0], header[1])
+					self.end_headers()
+					data = response.read()
+					self.wfile.write(data)
+					
+					# Now Cache this. 
+					duration = self.server.cache.maxDuration
+					
+					if cacheControl == "": # No instruction on cache, so cache all you want
+						self.server.cache.cache(parsedRequest.netloc + parsedRequest.path, sys.getsizeof(data), time.time(), duration, data, headers)
+						# print len(self.server.cache.map)
+					
+					
+				# Redirect, so simply forward the response to client and we'll receive a new response eventually. 
+				elif response.status >= 300 and response.status < 400:
+					self.send_response(response.status)
+					headers = response.getheaders()
+					
+					for header in headers:
+						self.send_header(header[0], header[1])
+					self.end_headers()
+					data = response.read()
+					self.wfile.write(data)
+				
+				else:
+					self.send_response(400)
+					
+				# Done with this connection, so just go ahead and collect the resources
+				connection.close()
+
+			except httplib.NotConnected:
+				self.send_response( 400, "Proxy cannot establsh connection to server")
+			except httplib.InvalidURL:
+				self.send_response( 400, "Invalid URL")
+			except httplib.BadStatusLine:
+				self.send_response( 500, "Destination server fucked up")
+			except:
+				self.send_response( 500, "Something went wrong that we didn't know about")
+			
 
 class ProxyServer(HTTPServer):
 	""" 
@@ -270,7 +298,7 @@ if __name__ == '__main__':
 
 	print 'Proxy has started and is listening to requests, use <Ctrl-C> to stop'
 	
-	# Shuts down all concurrent threads that the server spawns.
+	# Shuts down all concurrent threads that the server spawns, when the main thread quits.
 	ThreadingMixIn.daemon_threads = True
 		
 	server = ThreadedProxyServer((server_host, server_port), CachedRequestHandler)

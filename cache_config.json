@@ -1,7 +1,7 @@
 {
 	"cacheDuration": 30000,
-	"cacheMinDuration": 2,
-	"cacheSizeBytes": 2048,
-	"cacheSizeElements": 50
+	"cacheMinDuration": 100,
+	"cacheSizeBytes": 5000000,
+	"cacheSizeElements":100
 	
 }
